@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
@@ -26,6 +27,7 @@ import (
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
+	"sigs.k8s.io/apiserver-network-proxy/pkg/common"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/server/metrics"
 )
 
@@ -68,9 +70,10 @@ func (t *Tunnel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Type: client.PacketType_DIAL_REQ,
 		Payload: &client.Packet_DialRequest{
 			DialRequest: &client.DialRequest{
-				Protocol: "tcp",
-				Address:  r.Host,
-				Random:   random,
+				Protocol:   "tcp",
+				Address:    r.Host,
+				Random:     random,
+				WindowSize: common.WINDOW_SIZE,
 			},
 		},
 	}
@@ -162,6 +165,7 @@ func (t *Tunnel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
+		connection.flow.Acquire(context.Background(), 1)
 		err = backend.Send(packet)
 		if err != nil {
 			klog.ErrorS(err, "error sending packet")

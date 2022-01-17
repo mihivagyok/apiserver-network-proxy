@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
+	"sigs.k8s.io/apiserver-network-proxy/pkg/common"
 	"sigs.k8s.io/apiserver-network-proxy/proto/agent"
 )
 
@@ -65,6 +66,14 @@ func TestServeData_HTTP(t *testing.T) {
 	err = stream.Send(dataPacket)
 	if err != nil {
 		t.Error(err.Error())
+	}
+
+	pkg, _ = stream.Recv()
+	if pkg == nil {
+		t.Fatal("unexpected nil packet")
+	}
+	if pkg.Type != client.PacketType_DATA_ACK {
+		t.Errorf("expect PacketType_DATA_ACK; got %v", pkg.Type)
 	}
 
 	// Expect receiving http response via (Agent) Client
@@ -231,9 +240,10 @@ func newDialPacket(protocol, address string, random int64) *client.Packet {
 		Type: client.PacketType_DIAL_REQ,
 		Payload: &client.Packet_DialRequest{
 			DialRequest: &client.DialRequest{
-				Protocol: protocol,
-				Address:  address,
-				Random:   random,
+				Protocol:   protocol,
+				Address:    address,
+				Random:     random,
+				WindowSize: common.WINDOW_SIZE,
 			},
 		},
 	}

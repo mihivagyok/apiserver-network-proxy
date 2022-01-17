@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
+	"sigs.k8s.io/apiserver-network-proxy/pkg/common"
 )
 
 // Tunnel provides ability to dial a connection through a tunnel.
@@ -134,7 +135,15 @@ func (t *grpcTunnel) serve(c clientConn) {
 				// On dial error, avoid leaking serve goroutine.
 				return
 			}
-
+		case client.PacketType_DATA_ACK:
+			resp := pkt.GetDataAck()
+			klog.InfoS("received DATA_ACK", "connectionID", resp.ConnectID)
+			t.connsLock.RLock()
+			_, ok := t.conns[resp.ConnectID]
+			t.connsLock.RUnlock()
+			if !ok {
+				klog.V(1).InfoS("connection not recognized", "connectionID", resp.ConnectID)
+			}
 		case client.PacketType_DATA:
 			resp := pkt.GetData()
 			// TODO: flow control
@@ -196,9 +205,10 @@ func (t *grpcTunnel) DialContext(ctx context.Context, protocol, address string) 
 		Type: client.PacketType_DIAL_REQ,
 		Payload: &client.Packet_DialRequest{
 			DialRequest: &client.DialRequest{
-				Protocol: protocol,
-				Address:  address,
-				Random:   random,
+				Protocol:   protocol,
+				Address:    address,
+				Random:     random,
+				WindowSize: common.WINDOW_SIZE,
 			},
 		},
 	}

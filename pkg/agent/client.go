@@ -28,12 +28,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/metadata"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/apiserver-network-proxy/konnectivity-client/proto/client"
 	"sigs.k8s.io/apiserver-network-proxy/pkg/agent/metrics"
+	"sigs.k8s.io/apiserver-network-proxy/pkg/common"
 	"sigs.k8s.io/apiserver-network-proxy/proto/agent"
 	"sigs.k8s.io/apiserver-network-proxy/proto/header"
 )
@@ -45,6 +47,7 @@ const xfrChannelSize = 150
 type connContext struct {
 	conn      net.Conn
 	connID    int64
+	flow      *semaphore.Weighted
 	cleanFunc func()
 	dataCh    chan []byte
 	cleanOnce sync.Once
@@ -382,20 +385,22 @@ func (a *Client) Serve() {
 
 		switch pkt.Type {
 		case client.PacketType_DIAL_REQ:
-			klog.V(4).InfoS("received DIAL_REQ")
+			dialReq := pkt.GetDialRequest()
+			klog.V(4).InfoS("received DIAL_REQ", "windowSize", dialReq.WindowSize)
 			dialResp := &client.Packet{
 				Type:    client.PacketType_DIAL_RSP,
 				Payload: &client.Packet_DialResponse{DialResponse: &client.DialResponse{}},
 			}
-
-			dialReq := pkt.GetDialRequest()
 			dialResp.GetDialResponse().Random = dialReq.Random
+			dialResp.GetDialResponse().WindowSize = common.WINDOW_SIZE
 
 			connID := atomic.AddInt64(&a.nextConnID, 1)
 			dataCh := make(chan []byte, xfrChannelSize)
 			dialDone := make(chan struct{})
 			ctx := &connContext{
 				dataCh:    dataCh,
+				connID:    connID,
+				flow:      semaphore.NewWeighted(dialReq.WindowSize - 1),
 				dialDone:  dialDone,
 				warnChLim: a.warnOnChannelLimit,
 			}
@@ -422,10 +427,10 @@ func (a *Client) Serve() {
 					klog.ErrorS(fmt.Errorf("connection is nil"), "cannot send CLOSE_RESP to nil connection")
 				}
 			}
+			start := time.Now()
 			go func() {
 				a.connManager.Add(connID, ctx)
 				defer close(dialDone)
-				start := time.Now()
 				conn, err := net.DialTimeout(dialReq.Protocol, dialReq.Address, dialTimeout)
 				if err != nil {
 					a.connManager.Delete(connID)
@@ -442,8 +447,8 @@ func (a *Client) Serve() {
 					klog.ErrorS(err, "stream send failure")
 					return
 				}
-				go a.remoteToProxy(connID, ctx)
-				go a.proxyToRemote(connID, ctx)
+				go a.remoteToProxy(ctx)
+				go a.proxyToRemote(ctx)
 			}()
 
 		case client.PacketType_DATA:
@@ -453,6 +458,15 @@ func (a *Client) Serve() {
 			ctx, ok := a.connManager.Get(data.ConnectID)
 			if ok {
 				ctx.send(data.Data)
+			}
+
+		case client.PacketType_DATA_ACK:
+			dataAck := pkt.GetDataAck()
+			klog.V(4).InfoS("received DATA_ACK", "connectionID", dataAck.ConnectID)
+
+			ctx, ok := a.connManager.Get(dataAck.ConnectID)
+			if ok {
+				ctx.flow.Release(1)
 			}
 
 		case client.PacketType_CLOSE_REQ:
@@ -484,12 +498,12 @@ func (a *Client) Serve() {
 	}
 }
 
-func (a *Client) remoteToProxy(connID int64, ctx *connContext) {
+func (a *Client) remoteToProxy(ctx *connContext) {
 	defer func() {
 		if panicInfo := recover(); panicInfo != nil {
-			klog.V(2).InfoS("Exiting remoteToProxy with recovery", "panicInfo", panicInfo, "connectionID", connID)
+			klog.V(2).InfoS("Exiting remoteToProxy with recovery", "panicInfo", panicInfo, "connectionID", ctx.connID)
 		} else {
-			klog.V(2).InfoS("Exiting remoteToProxy", "connectionID", connID)
+			klog.V(2).InfoS("Exiting remoteToProxy", "connectionID", ctx.connID)
 		}
 	}()
 	defer ctx.cleanup()
@@ -501,50 +515,62 @@ func (a *Client) remoteToProxy(connID int64, ctx *connContext) {
 
 	for {
 		n, err := ctx.conn.Read(buf[:])
-		klog.V(5).InfoS("received data from remote", "bytes", n, "connectionID", connID)
+		klog.V(5).InfoS("received data from remote", "bytes", n, "connectionID", ctx.connID)
 
 		if err == io.EOF {
-			klog.V(2).InfoS("connection EOF", "connectionID", connID)
+			klog.V(2).InfoS("connection EOF", "connectionID", ctx.connID)
 			return
 		} else if err != nil {
 			// Normal when receive a CLOSE_REQ
-			klog.ErrorS(err, "connection read failure", "connectionID", connID)
+			klog.ErrorS(err, "connection read failure", "connectionID", ctx.connID)
 			return
 		} else {
 			resp.Payload = &client.Packet_Data{Data: &client.Data{
 				Data:      buf[:n],
-				ConnectID: connID,
+				ConnectID: ctx.connID,
 			}}
+			klog.V(4).InfoS("acquire flow", "connID", ctx.connID)
+			ctx.flow.Acquire(context.Background(), 1)
 			if err := a.Send(resp); err != nil {
-				klog.ErrorS(err, "stream send failure", "connectionID", connID)
+				klog.ErrorS(err, "stream send failure", "connectionID", ctx.connID)
 			}
 		}
 	}
 }
 
-func (a *Client) proxyToRemote(connID int64, ctx *connContext) {
+func (a *Client) proxyToRemote(ctx *connContext) {
 	defer func() {
 		if panicInfo := recover(); panicInfo != nil {
-			klog.V(2).InfoS("Exiting proxyToRemote with recovery", "panicInfo", panicInfo, "connectionID", connID)
+			klog.V(2).InfoS("Exiting proxyToRemote with recovery", "panicInfo", panicInfo, "connectionID", ctx.connID)
 		} else {
-			klog.V(2).InfoS("Exiting proxyToRemote", "connectionID", connID)
+			klog.V(2).InfoS("Exiting proxyToRemote", "connectionID", ctx.connID)
 		}
 	}()
 	defer ctx.cleanup()
 
 	for d := range ctx.dataCh {
+		resp := &client.Packet{
+			Type: client.PacketType_DATA_ACK,
+		}
+		resp.Payload = &client.Packet_DataAck{DataAck: &client.DataAck{
+			ConnectID: ctx.connID,
+		}}
+		klog.V(4).InfoS("send DATA_ACK", "connectionID", ctx.connID)
+		if err := a.Send(resp); err != nil {
+			klog.ErrorS(err, "stream send ack failure")
+		}
 		pos := 0
 		for {
 			n, err := ctx.conn.Write(d[pos:])
 			if err == nil {
-				klog.V(4).InfoS("write to remote", "connectionID", connID, "lastData", n, "dataSize", len(d))
+				klog.V(4).InfoS("write to remote", "connectionID", ctx.connID, "lastData", n, "dataSize", len(d))
 				break
 			} else if n > 0 {
 				// https://golang.org/pkg/io/#Writer specifies return non nil error if n < len(d)
-				klog.ErrorS(err, "write to remote with failure", "connectionID", connID, "lastData", n)
+				klog.ErrorS(err, "write to remote with failure", "connectionID", ctx.connID, "lastData", n)
 				pos += n
 			} else {
-				klog.ErrorS(err, "conn write failure", "connectionID", connID)
+				klog.ErrorS(err, "conn write failure", "connectionID", ctx.connID)
 				return
 			}
 		}

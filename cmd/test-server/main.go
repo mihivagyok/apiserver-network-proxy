@@ -144,7 +144,29 @@ func SetupSignalHandler() (stopCh <-chan struct{}) {
 }
 
 func returnSuccess(w http.ResponseWriter, req *http.Request) {
-	fmt.Fprintf(w, "<!DOCTYPE html>\n<html>\n    <head>\n        <title>Success</title>\n    </head>\n    <body>\n        <p>The success test page!</p>\n    </body>\n</html>")
+	countArr := req.URL.Query()["count"]
+	count := 1
+	var err error
+	if len(countArr) == 1 {
+		countStr := countArr[0]
+		count, err = strconv.Atoi(countStr)
+		if err != nil {
+			count = 1
+			klog.Warningf("Failed to parse count (%s), default to %d, got error %v.", countStr, count, err)
+		}
+	} else {
+		klog.Warningf("Count (%v) was length %d defaulting to sleep %d.", countArr, len(countArr), count)
+	}
+	if count <= 1 {
+		fmt.Fprintf(w, "<!DOCTYPE html>\n<html>\n    <head>\n        <title>Success</title>\n    </head>\n    <body>\n        <p>The success test page!</p>\n    </body>\n</html>\n")
+	} else {
+		fmt.Fprintf(w, "<!DOCTYPE html>\n<html>\n    <head>\n        <title>Success</title>\n    </head>\n    <body>\n        <p>\n")
+		for count > 0 {
+			fmt.Fprintf(w, "The success test page %d!\n", count)
+			count--
+		}
+		fmt.Fprintf(w, "</p>\n    </body>\n</html>\n")
+	}
 }
 
 func returnError(w http.ResponseWriter, req *http.Request) {
