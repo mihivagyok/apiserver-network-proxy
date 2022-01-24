@@ -551,11 +551,13 @@ func (a *Client) proxyToRemote(ctx *connContext) {
 	for d := range ctx.dataCh {
 		resp := &client.Packet{
 			Type: client.PacketType_DATA_ACK,
+			Payload: &client.Packet_DataAck{
+				DataAck: &client.DataAck{
+					ConnectID: ctx.connID,
+				},
+			},
 		}
-		resp.Payload = &client.Packet_DataAck{DataAck: &client.DataAck{
-			ConnectID: ctx.connID,
-		}}
-		klog.V(4).InfoS("send DATA_ACK", "connectionID", ctx.connID)
+		klog.V(4).InfoS("send DATA_ACK to server", "connectionID", ctx.connID)
 		if err := a.Send(resp); err != nil {
 			klog.ErrorS(err, "stream send ack failure")
 		}

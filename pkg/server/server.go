@@ -66,7 +66,6 @@ const (
 func (c *ProxyClientConnection) send(pkt *client.Packet) error {
 	switch pkt.Type {
 	case client.PacketType_DATA_ACK:
-		c.flow.Release(1)
 		return nil
 	case client.PacketType_DIAL_RSP:
 		c.in = make(chan client.Packet, common.WINDOW_SIZE)
@@ -93,7 +92,7 @@ func (c *ProxyClientConnection) serveFrontend() {
 	for pkt := range c.in {
 		switch pkt.Type {
 		case client.PacketType_DATA:
-			klog.V(4).InfoS("Sending DATA_ACK", "connID", c.connectID)
+			klog.V(4).InfoS("Sending DATA_ACK to backend", "connID", c.connectID)
 			packet := &client.Packet{
 				Type: client.PacketType_DATA_ACK,
 				Payload: &client.Packet_DataAck{
@@ -772,7 +771,7 @@ func (s *ProxyServer) serveRecvBackend(backend Backend, stream agent.AgentServic
 					dialErr = true
 				}
 				// Avoid adding the frontend if there was an error dialing the destination
-				if dialErr == true {
+				if dialErr {
 					break
 				}
 				frontend.connectID = resp.ConnectID
@@ -800,6 +799,7 @@ func (s *ProxyServer) serveRecvBackend(backend Backend, stream agent.AgentServic
 				klog.ErrorS(err, "could not get frontent client")
 				break
 			}
+			frontend.flow.Release(1)
 			frontend.send(pkt)
 
 		case client.PacketType_CLOSE_RSP:
