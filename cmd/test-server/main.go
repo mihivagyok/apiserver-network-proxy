@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -187,12 +188,54 @@ func sleepReturnSuccess(w http.ResponseWriter, req *http.Request) {
 	returnSuccess(w, req)
 }
 
+func uploadFile(w http.ResponseWriter, r *http.Request) {
+	// Maximum upload of 2 GB files
+	r.ParseMultipartForm(1 << 32)
+
+	// Get handler for filename, size and headers
+	file, handler, err := r.FormFile("data")
+	if err != nil {
+		fmt.Println("Error Retrieving the File")
+		fmt.Println(err)
+		return
+	}
+
+	defer file.Close()
+	fmt.Printf("Uploaded File: %+v\n", handler.Filename)
+	fmt.Printf("File Size: %+v\n", handler.Size)
+	fmt.Printf("MIME Header: %+v\n", handler.Header)
+
+	// Create file
+	dst, err := os.Create(handler.Filename)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	// Copy the uploaded file to the created file on the filesystem
+	if _, err := io.Copy(dst, file); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprintf(w, "Successfully Uploaded File\n")
+}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		uploadFile(w, r)
+	}
+}
+
 func (p *TestServer) runTestServer(ctx context.Context, o *TestServerRunOptions) (StopFunc, error) {
 	muxHandler := http.NewServeMux()
 	muxHandler.HandleFunc("/success", returnSuccess)
 	muxHandler.HandleFunc("/sleep", sleepReturnSuccess)
 	muxHandler.HandleFunc("/error", returnError)
 	muxHandler.HandleFunc("/close", closeNoResponse)
+	muxHandler.HandleFunc("/upload", uploadHandler)
 	server := &http.Server{
 		Addr:           fmt.Sprintf("127.0.0.1:%d", o.serverPort),
 		Handler:        muxHandler,
