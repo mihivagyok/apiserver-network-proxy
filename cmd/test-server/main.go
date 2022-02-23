@@ -189,8 +189,7 @@ func sleepReturnSuccess(w http.ResponseWriter, req *http.Request) {
 }
 
 func uploadFile(w http.ResponseWriter, r *http.Request) {
-	// Maximum upload of 2 GB files
-	r.ParseMultipartForm(1 << 32)
+	r.ParseMultipartForm(524288000)
 
 	// Get handler for filename, size and headers
 	file, handler, err := r.FormFile("data")
@@ -237,7 +236,7 @@ func (p *TestServer) runTestServer(ctx context.Context, o *TestServerRunOptions)
 	muxHandler.HandleFunc("/close", closeNoResponse)
 	muxHandler.HandleFunc("/upload", uploadHandler)
 	server := &http.Server{
-		Addr:           fmt.Sprintf("127.0.0.1:%d", o.serverPort),
+		Addr:           fmt.Sprintf(":%d", o.serverPort),
 		Handler:        muxHandler,
 		MaxHeaderBytes: 1 << 20,
 	}
